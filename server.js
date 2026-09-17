@@ -162,12 +162,17 @@ app.get('/api/store/:username', async (req, res) => {
 });
 //ADD NEW ITEM TO THE STORE
 app.post('/api/products', requireSeller, async (req, res) => {
-  const { name, price_rwf: priceRwf, image_url: imageUrl } = req.body;
-  const sellerId = req.seller.id;
-  if (!name?.trim() || !Number.isInteger(Number(priceRwf)) || Number(priceRwf) < 1) return res.status(400).json({ success: false, message: 'Product name and a valid RWF price are required' });
-  const productId = await nextId('products');
-  await pool.query('INSERT INTO products (id, seller_id, name, price_rwf, image_url) VALUES (?, ?, ?, ?, ?)', [productId, sellerId, name.trim(), Number(priceRwf), imageUrl || null]);
-  res.status(201).json({ success: true, product: { id: productId, seller_id: sellerId, name, price_rwf: Number(priceRwf), image_url: imageUrl || null } });
+  try {
+    const { name, price_rwf: priceRwf, image_url: imageUrl } = req.body;
+    const sellerId = req.seller.id;
+    if (!name?.trim() || !Number.isInteger(Number(priceRwf)) || Number(priceRwf) < 1) return res.status(400).json({ success: false, message: 'Product name and a valid RWF price are required' });
+    const productId = await nextId('products');
+    await pool.query('INSERT INTO products (id, seller_id, name, price_rwf, image_url) VALUES (?, ?, ?, ?, ?)', [productId, sellerId, name.trim(), Number(priceRwf), imageUrl || null]);
+    res.status(201).json({ success: true, product: { id: productId, seller_id: sellerId, name, price_rwf: Number(priceRwf), image_url: imageUrl || null } });
+  } catch (error) {
+    console.error('[products] Error creating product:', error);
+    res.status(500).json({ success: false, message: error.message || 'Unable to create product' });
+  }
 });
 //ORDER CHECKOUT
 // ORDER CHECKOUT
