@@ -18,9 +18,56 @@ const allowedOrigins = (process.env.FRONTEND_URL || 'https://easyorderdemo.netli
 app.use(cors({ origin: allowedOrigins }));
 app.use(express.json());
 app.use((req, _res, next) => {
-  req.body = req.body || {};
+  req.body = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {};
   next();
 });
+
+async function ensureDatabaseSchema() {
+  const schemaQueries = [
+    `CREATE TABLE IF NOT EXISTS sellers (
+      id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+      google_id VARCHAR(255) NOT NULL UNIQUE,
+      email VARCHAR(255) NOT NULL UNIQUE,
+      name VARCHAR(150) NOT NULL,
+      avatar_url VARCHAR(500),
+      username VARCHAR(80) NOT NULL UNIQUE,
+      momo_number VARCHAR(20),
+      paystack_recipient_code VARCHAR(120),
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB`,
+    `CREATE TABLE IF NOT EXISTS products (
+      id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+      seller_id INT UNSIGNED NOT NULL,
+      name VARCHAR(160) NOT NULL,
+      price_rwf INT UNSIGNED NOT NULL,
+      image_url VARCHAR(500),
+      is_active BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT fk_products_seller FOREIGN KEY (seller_id) REFERENCES sellers(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB`,
+    `CREATE TABLE IF NOT EXISTS orders (
+      id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+      seller_id INT UNSIGNED NOT NULL,
+      buyer_name VARCHAR(150) NOT NULL,
+      buyer_phone VARCHAR(20) NOT NULL,
+      delivery_address VARCHAR(500) NOT NULL,
+      items_json JSON NOT NULL,
+      total_amount INT UNSIGNED NOT NULL,
+      payment_status ENUM('pending', 'paid', 'failed') NOT NULL DEFAULT 'pending',
+      reference VARCHAR(120) NOT NULL UNIQUE,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT fk_orders_seller FOREIGN KEY (seller_id) REFERENCES sellers(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB`,
+    'ALTER TABLE sellers ADD COLUMN IF NOT EXISTS paystack_recipient_code VARCHAR(120)',
+    'ALTER TABLE products ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE',
+    'ALTER TABLE sellers MODIFY COLUMN id INT UNSIGNED NOT NULL AUTO_INCREMENT',
+    'ALTER TABLE products MODIFY COLUMN id INT UNSIGNED NOT NULL AUTO_INCREMENT',
+    'ALTER TABLE orders MODIFY COLUMN id INT UNSIGNED NOT NULL AUTO_INCREMENT',
+  ];
+
+  for (const query of schemaQueries) await pool.query(query);
+  console.log('[database] Schema ready');
+}
 
 const slugify = (value) => value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') || 'store';
 
@@ -152,10 +199,16 @@ app.get('/api/me', requireSeller, async (req, res) => {
 });
 
 app.post('/api/seller/payout-recipient', requireSeller, async (req, res) => {
-  const phone = normalizeRwandaPhone(req.body.momo_number);
-  const recipient = await createTransferRecipient({ name: req.seller.name, phone, email: req.seller.email });
-  await pool.query('UPDATE sellers SET momo_number = ?, paystack_recipient_code = ? WHERE id = ?', [phone, recipient, req.seller.id]);
-  res.json({ success: true, recipient_code: recipient, momo_number: phone });
+  try {
+    const phone = normalizeRwandaPhone(req.body.momo_number);
+    const recipient = await createTransferRecipient({ name: req.seller.name, phone, email: req.seller.email });
+    await pool.query('UPDATE sellers SET momo_number = ?, paystack_recipient_code = ? WHERE id = ?', [phone, recipient, req.seller.id]);
+    res.json({ success: true, recipient_code: recipient, momo_number: phone });
+  } catch (error) {
+    const status = error.message === 'Enter a valid Rwanda MoMo number' ? 400 : 500;
+    console.error('[payout-recipient] Error:', error);
+    res.status(status).json({ success: false, message: error.message || 'Unable to save payout number' });
+  }
 });
 
 app.get('/api/store/:username', async (req, res) => {
@@ -169,7 +222,7 @@ app.post('/api/products', requireSeller, async (req, res) => {
   try {
     const { name, price_rwf: priceRwf, image_url: imageUrl } = req.body || {};
     const sellerId = req.seller.id;
-    if (!name?.trim() || !Number.isInteger(Number(priceRwf)) || Number(priceRwf) < 1) return res.status(400).json({ success: false, message: 'Product name and a valid RWF price are required' });
+    if (typeof name !== 'string' || !name.trim() || !Number.isInteger(Number(priceRwf)) || Number(priceRwf) < 1) return res.status(400).json({ success: false, message: 'Product name and a valid RWF price are required' });
     const productId = await nextId('products');
     await pool.query('INSERT INTO products (id, seller_id, name, price_rwf, image_url) VALUES (?, ?, ?, ?, ?)', [productId, sellerId, name.trim(), Number(priceRwf), imageUrl || null]);
     res.status(201).json({ success: true, product: { id: productId, seller_id: sellerId, name, price_rwf: Number(priceRwf), image_url: imageUrl || null } });
@@ -185,9 +238,12 @@ app.post('/api/checkout', async (req, res) => {
     const { seller_id, buyer_name, buyer_phone, delivery_address, items } = req.body;
 
     // 1. Validate required fields
-    if (!seller_id || !buyer_name?.trim() || !buyer_phone?.trim() || !delivery_address?.trim() || !Array.isArray(items) || items.length === 0) {
+    if (!seller_id || typeof buyer_name !== 'string' || !buyer_name.trim() || typeof buyer_phone !== 'string' || !buyer_phone.trim() || typeof delivery_address !== 'string' || !delivery_address.trim() || !Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ success: false, message: 'Missing or invalid checkout information' });
     }
+
+    const [sellers] = await pool.query('SELECT id FROM sellers WHERE id = ?', [seller_id]);
+    if (!sellers.length) return res.status(404).json({ success: false, message: 'Seller not found' });
 
     // 2. Validate and normalize the buyer's Rwandan phone number
     let normalizedPhone;
@@ -200,9 +256,12 @@ app.post('/api/checkout', async (req, res) => {
     // 3. Calculate total price from the items array
     let totalAmount = 0;
     for (const item of items) {
+      if (!item || typeof item !== 'object') {
+        return res.status(400).json({ success: false, message: 'Invalid checkout item' });
+      }
       const price = Number(item.price_rwf || item.price);
       const qty = Number(item.quantity || item.qty || 1);
-      if (isNaN(price) || price < 1) {
+      if (!Number.isInteger(price) || price < 1 || !Number.isInteger(qty) || qty < 1) {
         return res.status(400).json({ success: false, message: `Invalid price for item: ${item.name || 'Unknown'}` });
       }
       totalAmount += price * qty;
@@ -291,7 +350,14 @@ app.post('/api/webhook/paystack', async (req, res) => {
 
 app.use((error, _req, res, _next) => {
   console.error(error);
-  res.status(500).json({ success: false, message: 'Something went wrong' });
+  const status = Number(error.status || error.statusCode) || 500;
+  const message = status >= 500 ? 'Something went wrong' : error.message || 'Invalid request';
+  res.status(status).json({ success: false, message });
 });
 
-app.listen(port, () => console.log(`Kigali MoMo Store API running on http://localhost:${port}`));
+ensureDatabaseSchema()
+  .then(() => app.listen(port, () => console.log(` API running on${port}`)))
+  .catch((error) => {
+    console.error('[database] Schema initialization failed:', error);
+    process.exitCode = 1;
+  });
