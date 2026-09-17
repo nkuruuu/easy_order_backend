@@ -1,10 +1,19 @@
 import 'dotenv/config';
 import mysql from 'mysql2/promise';
 
-// 1. Determine the database target string
-// If MYSQL_URL exists (on Railway), use it. Otherwise, fall back to a local string constructed from individual variables.
-const connectionString = process.env.MYSQL_URL || {
-  uri: `mysql://${process.env.DB_USER || 'root'}:${process.env.DB_PASS || ''}@${process.env.DB_HOST || '127.0.0.1'}:${process.env.DB_PORT || 3306}/${process.env.DB_NAME || 'easy_order'}`
+const mysqlUrl = process.env.MYSQL_URL;
+const host = process.env.MYSQLHOST || process.env.DB_HOST;
+const port = process.env.MYSQLPORT || process.env.DB_PORT || 3306;
+const user = process.env.MYSQLUSER || process.env.DB_USER;
+const password = process.env.MYSQLPASSWORD || process.env.DB_PASS || '';
+const database = process.env.MYSQLDATABASE || process.env.DB_NAME;
+
+if (!mysqlUrl && (!host || !user || !database)) {
+  throw new Error('Database configuration missing. Set MYSQL_URL or MYSQLHOST, MYSQLPORT, MYSQLUSER, MYSQLPASSWORD, and MYSQLDATABASE.');
+}
+
+const connectionString = mysqlUrl || {
+  uri: `mysql://${encodeURIComponent(user)}:${encodeURIComponent(password)}@${host}:${port}/${database}`
 };
 
 // 2. Create the configuration object
