@@ -17,6 +17,10 @@ const allowedOrigins = (process.env.FRONTEND_URL || 'https://easyorderdemo.netli
 // CONNECT BACKEND APP WITH FRONTEND USING CORS
 app.use(cors({ origin: allowedOrigins }));
 app.use(express.json());
+app.use((req, _res, next) => {
+  req.body = req.body || {};
+  next();
+});
 
 const slugify = (value) => value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') || 'store';
 
@@ -59,7 +63,7 @@ async function requireSeller(req, res, next) {
     const authorization = req.headers.authorization || '';
     const credential = authorization.startsWith('Bearer ')
       ? authorization.slice(7)
-      : req.body.credential;
+      : req.body?.credential;
     const identity = await verifySeller(credential);
     const [sellers] = await pool.query('SELECT id, google_id, email, name, avatar_url, username, momo_number FROM sellers WHERE google_id = ?', [identity.sub]);
     if (!sellers.length) return res.status(401).json({ success: false, message: 'Seller account not found' });
@@ -163,7 +167,7 @@ app.get('/api/store/:username', async (req, res) => {
 //ADD NEW ITEM TO THE STORE
 app.post('/api/products', requireSeller, async (req, res) => {
   try {
-    const { name, price_rwf: priceRwf, image_url: imageUrl } = req.body;
+    const { name, price_rwf: priceRwf, image_url: imageUrl } = req.body || {};
     const sellerId = req.seller.id;
     if (!name?.trim() || !Number.isInteger(Number(priceRwf)) || Number(priceRwf) < 1) return res.status(400).json({ success: false, message: 'Product name and a valid RWF price are required' });
     const productId = await nextId('products');
