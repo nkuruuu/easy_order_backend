@@ -1,12 +1,20 @@
 import 'dotenv/config';
 import mysql from 'mysql2/promise';
 
+// 1. Determine the database target string
+// If MYSQL_URL exists (on Railway), use it. Otherwise, fall back to a local string constructed from individual variables.
+const connectionString = process.env.MYSQL_URL || {
+  uri: `mysql://${process.env.DB_USER || 'root'}:${process.env.DB_PASS || ''}@${process.env.DB_HOST || '127.0.0.1'}:${process.env.DB_PORT || 3306}/${process.env.DB_NAME || 'easy_order'}`
+};
+
+// 2. Create the configuration object
+const poolConfig = typeof connectionString === 'string' 
+  ? { uri: connectionString } 
+  : connectionString;
+
+// 3. Instantiate the connection pool
 export const pool = mysql.createPool({
-  host: process.env.DB_HOST || process.env.MYSQL_HOST || '127.0.0.1',
-  port: Number(process.env.DB_PORT || process.env.MYSQL_PORT || 3306),
-  user: process.env.DB_USER || process.env.MYSQL_USER || 'root',
-  password: process.env.DB_PASS ?? process.env.MYSQL_PASSWORD ?? '',
-  database: process.env.DB_NAME || process.env.MYSQL_DATABASE || 'easy_order',
+  ...poolConfig,
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0,
