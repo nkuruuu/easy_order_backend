@@ -20,6 +20,13 @@ app.use(express.json());
 
 const slugify = (value) => value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') || 'store';
 
+async function nextId(table) {
+  const allowedTables = new Set(['sellers', 'products', 'orders']);
+  if (!allowedTables.has(table)) throw new Error(`Unsupported table for id generation: ${table}`);
+  const [rows] = await pool.query(`SELECT COALESCE(MAX(id), 0) + 1 AS nextId FROM ${table}`);
+  return Number(rows[0].nextId);
+}
+
 async function uniqueUsername(email) {
   const base = slugify(email.split('@')[0]);
   let username = base;
@@ -120,11 +127,12 @@ app.post('/api/auth/google', async (req, res) => {
     if (existing.length) return res.json({ success: true, seller: existing[0] });
 
     const username = await uniqueUsername(identity.email);
+    const sellerId = await nextId('sellers');
     const [result] = await pool.query(
-      'INSERT INTO sellers (google_id, email, name, avatar_url, username) VALUES (?, ?, ?, ?, ?)',
-      [identity.sub, identity.email, identity.name || identity.email.split('@')[0], identity.picture || null, username],
+      'INSERT INTO sellers (id, google_id, email, name, avatar_url, username) VALUES (?, ?, ?, ?, ?, ?)',
+      [sellerId, identity.sub, identity.email, identity.name || identity.email.split('@')[0], identity.picture || null, username],
     );
-    const [created] = await pool.query('SELECT id, google_id, email, name, avatar_url, username, momo_number FROM sellers WHERE id = ?', [result.insertId]);
+    const [created] = await pool.query('SELECT id, google_id, email, name, avatar_url, username, momo_number FROM sellers WHERE id = ?', [sellerId]);
     res.status(201).json({ success: true, seller: created[0] });
   } catch (error) {
     res.status(401).json({ success: false, message: error.message });
@@ -157,8 +165,9 @@ app.post('/api/products', requireSeller, async (req, res) => {
   const { name, price_rwf: priceRwf, image_url: imageUrl } = req.body;
   const sellerId = req.seller.id;
   if (!name?.trim() || !Number.isInteger(Number(priceRwf)) || Number(priceRwf) < 1) return res.status(400).json({ success: false, message: 'Product name and a valid RWF price are required' });
-  const [result] = await pool.query('INSERT INTO products (seller_id, name, price_rwf, image_url) VALUES (?, ?, ?, ?)', [sellerId, name.trim(), Number(priceRwf), imageUrl || null]);
-  res.status(201).json({ success: true, product: { id: result.insertId, seller_id: sellerId, name, price_rwf: Number(priceRwf), image_url: imageUrl || null } });
+  const productId = await nextId('products');
+  await pool.query('INSERT INTO products (id, seller_id, name, price_rwf, image_url) VALUES (?, ?, ?, ?, ?)', [productId, sellerId, name.trim(), Number(priceRwf), imageUrl || null]);
+  res.status(201).json({ success: true, product: { id: productId, seller_id: sellerId, name, price_rwf: Number(priceRwf), image_url: imageUrl || null } });
 });
 //ORDER CHECKOUT
 // ORDER CHECKOUT
@@ -199,9 +208,10 @@ app.post('/api/checkout', async (req, res) => {
 
     // 5. Save the order to the database with a 'pending' payment status
     const itemsJson = JSON.stringify(items);
+    const orderId = await nextId('orders');
     await pool.query(
-      'INSERT INTO orders (seller_id, buyer_name, buyer_phone, delivery_address, items_json, total_amount, payment_status, reference) VALUES (?, ?, ?, ?, ?, ?, \'pending\', ?)',
-      [seller_id, buyer_name.trim(), normalizedPhone, delivery_address.trim(), itemsJson, totalAmount, reference]
+      'INSERT INTO orders (id, seller_id, buyer_name, buyer_phone, delivery_address, items_json, total_amount, payment_status, reference) VALUES (?, ?, ?, ?, ?, ?, ?, \'pending\', ?)',
+      [orderId, seller_id, buyer_name.trim(), normalizedPhone, delivery_address.trim(), itemsJson, totalAmount, reference]
     );
 
     // 6. Initialize Paystack Mobile Money Transaction
