@@ -10,12 +10,24 @@ import { pool } from './db.js';
 const app = express();
 const port = Number(process.env.PORT || 5000);
 const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
-const allowedOrigins = (process.env.FRONTEND_URL || 'https://easyorderdemo.netlify.app,http://localhost:5173')
+const allowedOrigins = (process.env.FRONTEND_URL || '')
   .split(',')
   .map((origin) => origin.trim())
   .filter(Boolean);
+for (const origin of ['https://easyorderdemo.netlify.app', 'http://localhost:5173']) {
+  if (!allowedOrigins.includes(origin)) allowedOrigins.push(origin);
+}
 // CONNECT BACKEND APP WITH FRONTEND USING CORS
-app.use(cors({ origin: allowedOrigins }));
+app.use(cors({
+  origin: (origin, callback) => {
+    if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
+    return callback(new Error(`Origin not allowed by CORS: ${origin}`));
+  },
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true,
+  optionsSuccessStatus: 204,
+}));
 app.use(express.json());
 app.use((req, _res, next) => {
   req.body = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {};
@@ -23,7 +35,7 @@ app.use((req, _res, next) => {
 });
 
 async function ensureDatabaseSchema() {
-  const schemaQueries = [
+  const createTableQueries = [
     `CREATE TABLE IF NOT EXISTS sellers (
       id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
       google_id VARCHAR(255) NOT NULL UNIQUE,
@@ -58,14 +70,25 @@ async function ensureDatabaseSchema() {
       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       CONSTRAINT fk_orders_seller FOREIGN KEY (seller_id) REFERENCES sellers(id) ON DELETE CASCADE
     ) ENGINE=InnoDB`,
-    'ALTER TABLE sellers ADD COLUMN IF NOT EXISTS paystack_recipient_code VARCHAR(120)',
-    'ALTER TABLE products ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE',
+  ];
+
+  for (const query of createTableQueries) await pool.query(query);
+
+  const repairQueries = [
+    'ALTER TABLE sellers ADD COLUMN paystack_recipient_code VARCHAR(120)',
+    'ALTER TABLE products ADD COLUMN is_active BOOLEAN NOT NULL DEFAULT TRUE',
     'ALTER TABLE sellers MODIFY COLUMN id INT UNSIGNED NOT NULL AUTO_INCREMENT',
     'ALTER TABLE products MODIFY COLUMN id INT UNSIGNED NOT NULL AUTO_INCREMENT',
     'ALTER TABLE orders MODIFY COLUMN id INT UNSIGNED NOT NULL AUTO_INCREMENT',
   ];
-
-  for (const query of schemaQueries) await pool.query(query);
+  for (const query of repairQueries) {
+    try {
+      await pool.query(query);
+    } catch (error) {
+      const duplicateColumn = error.code === 'ER_DUP_FIELDNAME' || error.code === 'ER_DUP_COLUMN_NAME';
+      if (!duplicateColumn) console.warn(`[database] Repair skipped: ${error.message}`);
+    }
+  }
   console.log('[database] Schema ready');
 }
 
